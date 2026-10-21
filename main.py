@@ -12,8 +12,9 @@ WORK.mkdir(exist_ok=True)
 USED = pathlib.Path("used_topics.txt")
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-PEXELS_KEY = os.environ["PEXELS_API_KEY"]
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+PEXELS_KEY = os.getenv("PEXELS_API_KEY", "")
+PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 VOICE = os.getenv("VOICE", "en-US-AriaNeural")  # other US voices: en-US-GuyNeural, en-US-AndrewNeural, en-US-JennyNeural
 PRIVACY = os.getenv("PRIVACY", "private")  # private / unlisted / public
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -40,18 +41,27 @@ Rules:
 Return ONLY JSON in this format:
 {{"topic": "...", "title": "... (max 70 chars, catchy)", "description": "2-3 lines + hashtags", "tags": ["..."],
  "scenes": [{{"narration": "...", "keyword": "..."}}]}}"""
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-        headers={"x-goog-api-key": GEMINI_KEY},
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0},
-        },
-        timeout=120,
-    )
-    r.raise_for_status()
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(text)
+    models = [GEMINI_MODEL, "gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-3-flash-preview"]
+    last = None
+    for m in dict.fromkeys(models):  # duplicates hata ke, order same
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
+            headers={"x-goog-api-key": GEMINI_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0},
+            },
+            timeout=180,
+        )
+        if r.status_code in (400, 403, 404, 429, 503):
+            print(f"Model {m} failed: {r.status_code} {r.text[:300]}")
+            last = r
+            continue
+        r.raise_for_status()
+        print("Using model:", m)
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text)
+    last.raise_for_status()
 
 
 # ---------- 2. Voice ----------
@@ -72,7 +82,36 @@ def duration(path):
 
 
 # ---------- 3. Visuals ----------
+def get_clip_pixabay(keyword, idx):
+    try:
+        r = requests.get(
+            "https://pixabay.com/api/videos/",
+            params={"key": PIXABAY_KEY, "q": keyword, "per_page": 20, "safesearch": "true"},
+            timeout=60,
+        )
+        r.raise_for_status()
+        hits = r.json().get("hits", [])
+        if not hits:
+            return None
+        v = random.choice(hits)["videos"]
+        url = (v.get("medium") or v.get("small") or v.get("tiny") or {}).get("url")
+        if not url:
+            return None
+        path = WORK / f"clip{idx}.mp4"
+        path.write_bytes(requests.get(url, timeout=120).content)
+        return path
+    except Exception as e:
+        print("Pixabay fail:", e)
+        return None
+
+
 def get_clip(keyword, idx):
+    if PIXABAY_KEY:
+        clip = get_clip_pixabay(keyword, idx)
+        if clip:
+            return clip
+    if not PEXELS_KEY:
+        return None
     try:
         r = requests.get(
             "https://api.pexels.com/videos/search",
@@ -174,4 +213,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
