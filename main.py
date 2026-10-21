@@ -162,7 +162,10 @@ def get_clip_pexels(keyword, idx):
         r.raise_for_status()
         videos = r.json().get("videos", [])
         if not videos:
-            return None
+            lst.write_text(
+    "".join(f"file '{p.resolve().as_posix()}'\n" for p in scenes),
+    encoding="utf-8"
+            )
         v = random.choice(videos)
         files = [f for f in v["video_files"] if f.get("width") and 500 <= f["width"] <= 1100] or v["video_files"]
         f = sorted(files, key=lambda x: x.get("width", 0))[0]
