@@ -10,7 +10,7 @@ USED = pathlib.Path("used_topics.txt")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 PEXELS_KEY = os.getenv("PEXELS_API_KEY", "").strip()
 PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip() or "gemini-flash-latest"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VOICE = os.getenv("VOICE", "").strip() or "en-US-AriaNeural"
 PRIVACY = os.getenv("PRIVACY", "").strip() or "private"
 
