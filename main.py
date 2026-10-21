@@ -16,7 +16,7 @@ MUSIC_DIR = pathlib.Path("music")  # yahan 3-5 royalty-free .mp3 rakho (YouTube 
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 PEXELS_KEY = os.environ.get("PEXELS_API_KEY", "")  # sirf image fail hone par backup
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 VOICE = os.getenv("VOICE", "en-US-GuyNeural")
 VOICE_RATE = os.getenv("VOICE_RATE", "+8%")
 PRIVACY = os.getenv("PRIVACY", "private")  # private / unlisted / public
