@@ -1,5 +1,5 @@
 """US-audience facts Shorts auto-maker: script -> voice -> video -> YouTube upload (private)."""
-import os, sys, json, random, subprocess, textwrap, asyncio, pathlib
+import os, sys, re, json, random, subprocess, textwrap, asyncio, pathlib, datetime
 import requests
 
 W, H = 720, 1280
@@ -13,6 +13,28 @@ PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip() or "gemini-flash-latest"
 VOICE = os.getenv("VOICE", "").strip() or "en-US-AriaNeural"
 PRIVACY = os.getenv("PRIVACY", "").strip() or "private"
+NICHE = (os.getenv("NICHE", "").strip() or "mystery").lower()  # "mystery" ya "facts"
+CREDITS = []  # Wikimedia photos ke credits (description mein jaate hain)
+
+if NICHE == "mystery":
+    NICHE_TEXT = ("intriguing, TRUE-based mystery topic: ancient and temple mysteries (architecture, archaeology, "
+                  "puzzling engineering, historical riddles) OR eerie documented unsolved mysteries and folklore/legends "
+                  "(horror-flavored mood but NEVER graphic)")
+    NICHE_ANGLE = "mystery/history/archaeology/folklore"
+    EVERGREEN_EX = ("'Why can't anyone explain the Kailasa Temple?', 'What is inside the sealed Vault B?', "
+                    "'Who built the Nazca Lines?'")
+    NICHE_RULES = (
+        "- ACCURACY: clearly separate what is KNOWN (documented/archaeological), what is LEGEND or folklore "
+        "(say 'Legend says...'), and what is THEORY (say 'Some researchers suggest...' or 'Nobody knows'). "
+        "Never present ghosts, curses or supernatural claims as real facts. Never repeat popular myths that are debunked.\n"
+        "- SAFETY: no gore, no graphic death details, no naming private or living people, no real crime victims, "
+        "no blaming any religion or community. Treat temples and sacred places with respect. Keep it advertiser-friendly.\n"
+        "- Mood: eerie and curious. If the mystery is unsolved, end the payoff with an open question.\n")
+else:
+    NICHE_TEXT = "surprising, TRUE, verifiable fact/knowledge topic (science or history)"
+    NICHE_ANGLE = "science/history/nature/space/human-body/technology fact"
+    EVERGREEN_EX = "'Why is the ocean salty?', 'How do airplanes stay up?', 'What happens if...'"
+    NICHE_RULES = ""
 
 
 def die(msg):
@@ -56,24 +78,80 @@ def run(cmd):
 
 
 # ---------- 1. Script ----------
+def get_trends():
+    """Google Trends US ke 10 trending searches (public RSS, key nahi chahiye). Fail ho to []"""
+    try:
+        import xml.etree.ElementTree as ET
+        r = requests.get("https://trends.google.com/trending/rss?geo=US",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        out = []
+        for item in root.iter("item"):
+            title, traffic, news = "", "", []
+            for ch in item:
+                tag = ch.tag.split("}")[-1]
+                if tag == "title":
+                    title = (ch.text or "").strip()
+                elif tag == "approx_traffic":
+                    traffic = (ch.text or "").strip()
+                elif tag == "news_item":
+                    for sub in ch:
+                        if sub.tag.split("}")[-1] == "news_item_title" and sub.text:
+                            news.append(sub.text.strip())
+            if title:
+                out.append({"title": title, "traffic": traffic, "news": news[:2]})
+        print("Trends mile:", [t["title"] for t in out])
+        return out[:10]
+    except Exception as e:
+        print("Google Trends fetch fail (evergreen topic use hoga):", e)
+        return []
+
+
 def make_script():
     used = USED.read_text().splitlines()[-60:] if USED.exists() else []
-    prompt = f"""You are a YouTube Shorts scriptwriter for a US audience. Pick one surprising, TRUE, verifiable fact/knowledge topic (science or history).
+    use_trend = random.random() < float(os.getenv("TREND_RATIO", "0.3"))  # ~30% videos trend par, 70% evergreen
+    trends = get_trends() if use_trend else []
+    trend_text = "; ".join(
+        f"{t['title']} ({t['traffic']}) - news: {' | '.join(t['news'])}" for t in trends
+    ) or "not available today"
+    if trends:
+        topic_rule = (
+            f"Google Trends US right now: {trend_text}\n"
+            "TOPIC CHOICE: if one of these trends can be tied to a TRUE, verifiable " + NICHE_ANGLE +
+            " angle, build the video on that angle and put the trend keyword in the title and tags. "
+            "IMPORTANT: make the facts timeless, so the video is still useful and interesting a year from now "
+            "(e.g. trending meteor shower -> 'why meteors glow', not 'tonight's shower'). "
+            "SKIP trends about people, celebrities, sports results, politics, crime, disasters, deaths, lawsuits, "
+            "health advice or breaking news. If no trend fits, use the evergreen rule below.\n"
+        )
+    else:
+        topic_rule = ""
+    topic_rule += (
+        "EVERGREEN RULE: choose a timeless topic that people actively SEARCH on Google/YouTube, phrased like a real "
+        f"question (e.g. {EVERGREEN_EX}). "
+        "Put that exact searchable question or phrase in the title. The facts must stay true for years. "
+        "Never make a video you are not confident is accurate.\n"
+    )
+    prompt = f"""You are a YouTube Shorts scriptwriter for a US audience. Pick one {NICHE_TEXT}.
 Do not repeat these topics: {used}
+
+{topic_rule}
 
 Rules:
 - Language: casual, conversational American English. Use US units (miles, Fahrenheit, dollars) when natural.
 - HOOK (most important): scene 1 narration is max 12 words and must stop the scroll in 2 seconds. Start with a shocking claim, a number, or a "you've been lied to" style contradiction. NEVER start with greetings, "Did you know", "Today", or "In this video". Tease a payoff that is revealed only near the end (open loop).
 - Pacing: total narration 95-115 words (about 35-45 seconds), split into 9 to 11 SHORT scenes of 8-14 words, ONE idea per scene. No filler, every line must add a new fact or twist.
-- Ending: last scene gives the payoff and ends in a way that links back to the hook so it loops naturally. Do not say "like and subscribe".
-- Only include facts you are highly confident are correct. No doubtful claims, no made-up statistics.
+- Ending: the second-last scene delivers the payoff. The LAST scene is a short CTA (max 8 words) giving a reason to follow or a comment question, e.g. "Follow for a new wild fact daily." or "Which fact shocked you most?" Vary the wording each time. Never say "like and subscribe".
+{NICHE_RULES}- Only include facts you are highly confident are correct. No doubtful claims, no made-up statistics.
+- Each scene has 'real_photo_query': the exact name of the REAL place/object/site shown (e.g. 'Kailasa Temple Ellora', 'Nazca Lines'), or an empty string if the scene is abstract. It is used to find a real copyright-free photo.
 - Each scene has 'image_prompt': a vivid English description (15-25 words) of ONE concrete, photorealistic, cinematic vertical image that literally shows what that scene says (subject, setting, lighting). No text, no logos, no real named people, no celebrity faces.
 - Each scene also has 'keywords': 3 stock-video search phrases (1-3 words, concrete things, specific to generic) as backup.
-- Title: max 70 characters, curiosity-driven, no clickbait lies. Description: 2-3 lines plus 3-5 hashtags. Tags: English.
+- Title: max 70 characters, curiosity-driven, no clickbait lies. Description: first line is a question that makes people comment, then 1-2 lines, then 3-5 hashtags. Tags: English.
 
 Return ONLY JSON in this format:
-{{"topic": "...", "title": "...", "description": "...", "tags": ["..."],
- "scenes": [{{"narration": "...", "image_prompt": "...", "keywords": ["...", "...", "..."]}}]}}"""
+{{"topic": "...", "trend_used": "trend name or none", "title": "...", "description": "...", "tags": ["..."],
+ "scenes": [{{"narration": "...", "real_photo_query": "...", "image_prompt": "...", "keywords": ["...", "...", "..."]}}]}}"""
     models = list(dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest", "gemini-3.1-flash-lite",
                                  "gemini-3-flash-preview", "gemini-2.5-flash"]))
     last = ""
@@ -136,6 +214,43 @@ def duration(path):
 
 
 # ---------- 3. Visuals ----------
+def get_wiki_image(query, idx):
+    """Wikimedia Commons se asli photo: sirf Public Domain / CC0 / CC BY (SA, NC, ND nahi). Credit save hota hai."""
+    if not query:
+        return None
+    try:
+        r = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={"action": "query", "generator": "search", "gsrsearch": query, "gsrnamespace": 6,
+                    "gsrlimit": 15, "prop": "imageinfo", "iiprop": "url|extmetadata|size|mime",
+                    "iiurlwidth": 1280, "format": "json"},
+            headers={"User-Agent": "auto-shorts/1.0 (personal educational project)"}, timeout=30)
+        r.raise_for_status()
+        pages = (r.json().get("query") or {}).get("pages", {})
+        for pg in sorted(pages.values(), key=lambda x: x.get("index", 99)):
+            ii = (pg.get("imageinfo") or [{}])[0]
+            md = ii.get("extmetadata", {})
+            lic = md.get("LicenseShortName", {}).get("value", "")
+            ll = lic.lower()
+            free = ("public domain" in ll or ll.startswith("cc0") or ll.startswith("pd")
+                    or (ll.startswith("cc by") and not any(x in ll for x in ("-sa", " sa", "-nc", "-nd", " nc", " nd"))))
+            if not free or ii.get("mime") not in ("image/jpeg", "image/png") or ii.get("width", 0) < 800:
+                continue
+            url = ii.get("thumburl") or ii.get("url")
+            data = requests.get(url, headers={"User-Agent": "auto-shorts/1.0"}, timeout=120).content
+            if len(data) < 20000:
+                continue
+            path = WORK / f"wiki{idx}.jpg"
+            path.write_bytes(data)
+            artist = re.sub(r"<[^>]+>", "", md.get("Artist", {}).get("value", "")).strip()[:60] or "Unknown author"
+            CREDITS.append(f"{artist} ({lic}) via Wikimedia Commons")
+            print(f"  scene {idx + 1} real photo: {pg.get('title')} [{lic}]")
+            return path
+    except Exception as e:
+        print("Wikimedia fail:", e)
+    return None
+
+
 def get_image(prompt, idx):
     """Free AI image (Pollinations). Fail ho to None -> stock clip backup."""
     if not prompt:
@@ -260,6 +375,21 @@ def render_scene(idx, narration, clip, audio, img=None):
 
 
 # ---------- 5. Upload ----------
+def build_status():
+    """PRIVACY=public -> seedha public. PUBLISH_DELAY_HOURS>0 -> private upload, YouTube itna time baad khud public kar dega."""
+    status = {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False}
+    try:
+        delay = float(os.getenv("PUBLISH_DELAY_HOURS", "0") or 0)
+    except ValueError:
+        delay = 0
+    if delay > 0:
+        when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=delay)
+        status["privacyStatus"] = "private"
+        status["publishAt"] = when.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        print("Video scheduled to go public at (UTC):", status["publishAt"])
+    return status
+
+
 def upload(video, data):
     try:
         from google.oauth2.credentials import Credentials
@@ -278,7 +408,7 @@ def upload(video, data):
                     "description": data.get("description", "") + "\n\n#Shorts",
                     "tags": data.get("tags", [])[:15], "categoryId": "27",
                     "defaultLanguage": "en", "defaultAudioLanguage": "en"},
-        "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
+        "status": build_status(),
     }
     try:
         yt = build("youtube", "v3", credentials=creds)
@@ -306,9 +436,9 @@ def main():
     for i, s in enumerate(data["scenes"]):
         audio = WORK / f"voice{i}.mp3"
         make_voice(s["narration"], audio)
-        img = get_image(s.get("image_prompt"), i)
+        img = get_wiki_image(s.get("real_photo_query"), i) or get_image(s.get("image_prompt"), i)
         clip = None if img else get_clip(s.get("keywords") or s.get("keyword") or ["nature"], i)
-        print(f"  scene {i + 1} visual:", "AI image" if img else ("stock clip" if clip else "plain bg"))
+        print(f"  scene {i + 1} visual:", "photo/AI image" if img else ("stock clip" if clip else "plain bg"))
         scenes.append(render_scene(i, s["narration"], clip, audio, img))
         print(f"Scene {i + 1}/{len(data['scenes'])} done")
     lst = WORK / "list.txt"
@@ -316,6 +446,8 @@ def main():
     final = WORK / "final.mp4"
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(final)])
     print("Video length:", round(duration(final), 1), "sec")
+    if CREDITS:
+        data["description"] = data.get("description", "") + "\n\nImage credits: " + "; ".join(dict.fromkeys(CREDITS))[:900]
     upload(final, data)
     with USED.open("a") as f:
         f.write(str(data.get("topic", data["title"])).replace("\n", " ") + "\n")
