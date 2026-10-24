@@ -52,7 +52,7 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || '0' }}
           USE_VEO: "0"
           IMAGE_BACKEND: pollinations
-          TEXT_MODEL: gemini-2.5-flash-lite
+          TEXT_MODEL: gemini-3.5-flash-lite
         run: python main.py
 
       - name: Test video save karo
