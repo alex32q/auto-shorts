@@ -1,6 +1,6 @@
 """
 Auto Instagram Reel bot
-Flow: topic -> web research (3+ sources, best chuno) -> 3 scripts -> best script
+Flow: topic -> PubMed research (papers, best chuno) -> 3 scripts -> best script
       -> images (Nano Banana) -> Veo (photo1 -> photo2 ...) -> voice -> edit -> Instagram
 """
 import asyncio
@@ -11,6 +11,7 @@ import pathlib
 import re
 import textwrap
 import time
+import xml.etree.ElementTree as ET
 
 import edge_tts
 import numpy as np
@@ -95,36 +96,64 @@ def pick_topic(history):
     return ask_json(
         f"Niche: {NICHE}. Instagram Reel ke liye ek naya topic chuno jo log search "
         f"karte hain (jaise 'tulsi ke patte aur pathri'). Ye topics repeat mat karo: {past}.\n"
-        'JSON: {"topic": "...", "claim": "wo popular daava jise jaanchna hai"}',
+        'JSON: {"topic": "...", "claim": "wo popular daava jise jaanchna hai", '
+        '"pubmed_query": "English mein 3-5 keywords, PubMed pe research dhundhne ke liye"}',
         temp=1.0)
 
 
-# ---------------- Step 2: research (3+ sources, best chuno) ----------------
-def research(claim):
-    resp = ask_raw(
-        f'Web search karke jaancho: "{claim}". 3-5 alag sources dekho (medical, university, '
-        "government, hospital sources ko blogs se upar rakho). Har source kya kehta hai aur "
-        "evidence kis level ka hai likho: insaanon pe trial / sirf lab-animal / sirf paramparik daava.",
-        search=True)
-    gm = resp.candidates[0].grounding_metadata
-    sources, seen = [], set()
-    for c in (getattr(gm, "grounding_chunks", None) or []):
-        if c.web and c.web.title not in seen:
-            seen.add(c.web.title)
-            sources.append(c.web.title)
-    log("Sources mile:", sources)
-    if len(sources) < 2:
+# ---------------- Step 2: research (PubMed, bilkul free) ----------------
+EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+
+def pubmed_search(query, n=6):
+    ids = requests.get(f"{EUTILS}/esearch.fcgi", params={
+        "db": "pubmed", "term": query, "retmax": n, "retmode": "json",
+        "sort": "relevance"}, timeout=40).json()["esearchresult"]["idlist"]
+    if not ids:
+        return []
+    raw = requests.get(f"{EUTILS}/efetch.fcgi", params={
+        "db": "pubmed", "id": ",".join(ids), "retmode": "xml"}, timeout=40).text
+    out = []
+    for art in ET.fromstring(raw).iter("PubmedArticle"):
+        t = art.find(".//ArticleTitle")
+        title = "".join(t.itertext()) if t is not None else ""
+        abstract = " ".join("".join(a.itertext()) for a in art.findall(".//AbstractText"))
+        if title and abstract:
+            out.append({
+                "title": title,
+                "journal": art.findtext(".//Journal/Title") or "",
+                "year": art.findtext(".//PubDate/Year") or "",
+                "types": [p.text for p in art.findall(".//PublicationType") if p.text],
+                "abstract": abstract[:700],
+            })
+    return out
+
+
+def research(claim, query):
+    try:
+        papers = pubmed_search(query)
+    except Exception as e:  # noqa
+        log("PubMed fail:", e)
+        return None
+    log("PubMed papers:", [p["title"] for p in papers])
+    if len(papers) < 2:
         return None
     info = ask_json(
-        f"Research notes:\n{resp.text}\n\nSources: {json.dumps(list(enumerate(sources)))}\n"
-        "Sources ko quality score (1-10) do: medical/gov/university ko zyada, blogs ko kam. "
-        "Sabse bharosemand source chuno (best_idx). safe_to_publish false karo agar koi achha "
-        "source nahi hai ya claim khatarnak hai (jaise doctor ka ilaaj chhodna).\n"
+        f"Claim: {claim}\nResearch papers (PubMed): {json.dumps(papers, ensure_ascii=False)}\n"
+        "In papers se jaancho ki claim kitna saabit hai. Har paper ko quality score (1-10) do: "
+        "insaanon pe trial / meta-analysis / systematic review ko zyada, animal ya lab study ko kam. "
+        "Sabse relevant aur bharosemand paper chuno (best_idx). Agar papers claim ko saabit "
+        "nahi karte, to imandaari se wahi batao (claim myth bhi ho sakta hai). safe_to_publish "
+        "false karo agar papers claim se match nahi karte ya claim khatarnak hai "
+        "(jaise doctor ka ilaaj chhodna).\n"
         'JSON: {"sources":[{"idx":0,"quality":0,"evidence_level":"human_trials|animal_or_lab|'
         'traditional_only|unclear","summary":""}],"best_idx":0,"safe_to_publish":true,'
         '"safe_framing":"claim ko imandaari se kaise bolna hai"}')
     idx = info.get("best_idx", 0)
-    info["best_source"] = sources[idx] if idx < len(sources) else sources[0]
+    if not isinstance(idx, int) or idx >= len(papers):
+        idx = 0
+    p = papers[idx]
+    info["best_source"] = f'PubMed: {p["journal"]} {p["year"]}'.strip()
     log("Research verdict:", json.dumps(info, ensure_ascii=False))
     return info
 
@@ -367,7 +396,7 @@ def main():
     topic, claim = t["topic"], t["claim"]
     log("Topic:", topic, "| Claim:", claim)
 
-    info = research(claim)
+    info = research(claim, t.get("pubmed_query") or claim)
     if not info or not info.get("safe_to_publish"):
         log("SKIP: bharosemand source nahi mila ya claim safe nahi.")
         history.append({"topic": topic, "status": "skipped"})
