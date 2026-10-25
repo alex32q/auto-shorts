@@ -23,10 +23,10 @@ from PIL import Image, ImageDraw, ImageFont
 # ---------------- Settings ----------------
 TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-3.5-flash-lite")
 VEO_MODEL = os.getenv("VEO_MODEL", "veo-3.1-fast-generate-preview")
-USE_VEO = os.getenv("USE_VEO", "0") == "1"     # 0 = free motion effects (default)
-SEGMENTS = int(os.getenv("SEGMENTS", "3"))      # 3 segments = 4 images
-VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")  # male: hi-IN-MadhurNeural
-DRY_RUN = os.getenv("DRY_RUN", "0") == "1"      # 1 = upload nahi, sirf video banao
+USE_VEO = os.getenv("USE_VEO", "0") == "1"       # 0 = free motion effects (default)
+SEGMENTS = int(os.getenv("SEGMENTS", "3"))        # 3 segments = 4 images
+VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")   # male: hi-IN-MadhurNeural
+DRY_RUN = os.getenv("DRY_RUN", "0") == "1"        # 1 = upload nahi, sirf video banao
 GRAPH = "https://graph.facebook.com/v21.0"
 
 W, H = 1080, 1920
@@ -124,7 +124,7 @@ def write_script(topic, angle):
             "- Bhasha real life jaisi ho: Hindi/Hinglish, simple aur dil se.\n"
             "- Pehla segment strong hook ho jo dil ko chhu jaye.\n"
             "- Aakhri segment mein ek sawaal ya comment ka call-to-action ho.\n"
-            f"- character: ek short fixed description (jaise 'a young Indian woman in a yellow kurti, "
+            "- character: ek short fixed description (jaise 'a young Indian woman in a yellow kurti, "
             "long black hair'). Ye har image mein same rahega.\n"
             f"- images: exactly {SEGMENTS + 1} scene prompts (English). Har prompt mein character "
             "ka description repeat ho, aur mood topic ke hisaab se ho. Koi text na ho.\n"
@@ -156,12 +156,19 @@ def pick_best(scripts):
         "Har script ko score do (1-10): hook (scroll rokne wala), quality (shayari kitni dil se "
         "nikli hui aur asli lagti hai, ghisi-pitti line nahi). safe=false karo agar script mein "
         "gaali, nafrat, kisi asli insaan ka naam ya kisi ko nuksan pahunchane wali baat ho.\n"
-        'JSON: {"scores":[{"i":0,"hook":0,"quality":0,"safe":true}]}')
+        'JSON object mein do: {"scores":[{"i":0,"hook":0,"quality":0,"safe":true}]}')
     log("Judge:", res)
-    ok = [x for x in res["scores"] if x["safe"] and x["quality"] >= 7]
+    items = res.get("scores", res) if isinstance(res, dict) else res
+    ok = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        idx = x.get("i")
+        if isinstance(idx, int) and 0 <= idx < len(scripts) and x.get("safe") and x.get("quality", 0) >= 7:
+            ok.append(x)
     if not ok:
         return None
-    best = max(ok, key=lambda x: x["hook"] + x["quality"])
+    best = max(ok, key=lambda x: x.get("hook", 0) + x.get("quality", 0))
     return scripts[best["i"]]
 
 
