@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "1 = Test only, 0 = Actual Instagram publish"
+        description: "1 = Test only, 0 = Actual publish"
         required: true
         default: "0"
         type: choice
@@ -13,36 +13,17 @@ on:
           - "0"
           - "1"
 
-  # Testing ke baad daily schedule enable karna.
-  # schedule:
-  #   - cron: "30 2 * * *"
-  #   - cron: "30 5 * * *"
-  #   - cron: "30 8 * * *"
-  #   - cron: "30 11 * * *"
-  #   - cron: "0 14 * * *"
-  #   - cron: "0 16 * * *"
-
 permissions:
   contents: write
-
-concurrency:
-  group: instagram-reel-bot
-  cancel-in-progress: false
 
 jobs:
   publish-reel:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    defaults:
-      run:
-        working-directory: reelbot
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -51,40 +32,32 @@ jobs:
           cache: pip
           cache-dependency-path: reelbot/requirements.txt
 
-      - name: Install system dependencies
+      - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Install Python dependencies
+        working-directory: reelbot
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Validate required secrets
+      - name: Check required secrets
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
         run: |
-          python - <<'PY'
-          import os
-          required = [
-              "GEMINI_API_KEY",
-              "CLOUDINARY_URL",
-              "IG_USER_ID",
-              "IG_ACCESS_TOKEN",
-          ]
-          missing = [k for k in required if not os.getenv(k)]
-          if missing:
-              raise SystemExit(
-                  "Missing GitHub Actions secrets: " + ", ".join(missing)
-              )
-          print("Required secrets are present.")
-          PY
+          test -n "$GEMINI_API_KEY" || exit 1
+          test -n "$CLOUDINARY_URL" || exit 1
+          test -n "$IG_USER_ID" || exit 1
+          test -n "$IG_ACCESS_TOKEN" || exit 1
+          echo "Required secrets are present."
 
-      - name: Generate and publish Reel
+      - name: Run Reel Bot
+        working-directory: reelbot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
@@ -94,20 +67,5 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
           PYTHONUNBUFFERED: "1"
-        run: |
-          python -u main.py
-
-      - name: Save topic history
-        if: ${{ success() && inputs.dry_run != '1' }}
-        working-directory: .
-        run: |
-          if [ -n "$(git status --porcelain -- reelbot/data/history.json)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add reelbot/data/history.json
-            git commit -m "Update Reel Bot topic history" || true
-            git push
-          else
-            echo "No topic history changes to commit."
-          fi
+        run: python -u main.py
 ```
