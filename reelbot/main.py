@@ -1,7 +1,7 @@
 """
 Auto Instagram Reel bot
-Flow: topic -> PubMed research (papers, best chuno) -> 3 scripts -> best script
-      -> images (Nano Banana) -> Veo (photo1 -> photo2 ...) -> voice -> edit -> Instagram
+Health topic -> PubMed research -> scripts -> best script -> images -> video -> Instagram
+Motivation/shayari topic -> seedha scripts -> best script -> images -> video -> Instagram
 """
 import asyncio
 import io
@@ -29,7 +29,7 @@ IMAGE_BACKEND = os.getenv("IMAGE_BACKEND", "pollinations")  # pollinations = fre
 SEGMENTS = int(os.getenv("SEGMENTS", "3"))       # 3 segments = 4 photos = 3 Veo clips
 VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")  # male: hi-IN-MadhurNeural
 DRY_RUN = os.getenv("DRY_RUN", "0") == "1"       # 1 = upload nahi, sirf video banao
-NICHE = os.getenv("NICHE", "ghar ke nuskhe aur health myths (Indian audience)")
+NICHE = os.getenv("NICHE", "ghar ke nuskhe, health myths, shayari aur motivation (Indian audience)")
 GRAPH = "https://graph.facebook.com/v21.0"
 
 W, H = 1080, 1920
@@ -43,11 +43,18 @@ STYLE = (
     "main character: friendly Indian cartoon grandmother (dadi) with white hair bun, "
     "round glasses, orange saree. No text or letters in the image"
 )
-ANGLES = [
+HEALTH_ANGLES = [
     "Myth vs Fact (sach ya myth?)",
     "Log ye galti karte hain",
     "Dadi ka nuskha: kya science maanta hai?",
 ]
+MOTIVATION_ANGLES = [
+    "Sad shayari: dil ko chhu jane wali, akeli raat ka mood",
+    "Motivation: mushkil waqt mein himmat dene wali baat",
+    "Ek line jo sochne pe majboor kare",
+]
+HEALTH_FOOTER = "Ye sirf jankari ke liye hai. Bimari mein doctor se salah lein."
+MOTIVATION_FOOTER = "Roz ek shayari ke liye follow karo"
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
@@ -57,10 +64,8 @@ def log(*a):
 
 
 # ---------------- Gemini helpers ----------------
-def ask_raw(prompt, search=False, as_json=False, temp=0.4):
+def ask_raw(prompt, as_json=False, temp=0.4):
     kwargs = {"temperature": temp}
-    if search:
-        kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     if as_json:
         kwargs["response_mime_type"] = "application/json"
     for attempt in range(3):
@@ -94,14 +99,16 @@ def save_history(h):
 def pick_topic(history):
     past = [h["topic"] for h in history[-60:]]
     return ask_json(
-        f"Niche: {NICHE}. Instagram Reel ke liye ek naya topic chuno jo log search "
-        f"karte hain (jaise 'tulsi ke patte aur pathri'). Ye topics repeat mat karo: {past}.\n"
-        'JSON: {"topic": "...", "claim": "wo popular daava jise jaanchna hai", '
-        '"pubmed_query": "English mein 3-5 keywords, PubMed pe research dhundhne ke liye"}',
+        f"Niche: {NICHE}. Instagram Reel ke liye ek naya topic chuno. Ye topics repeat mat karo: {past}.\n"
+        "Agar topic health/nuskhe/khane-peene ka hai to type 'health' do. Agar shayari, sad mood, "
+        "motivation ya zindagi ki seekh ka hai to type 'motivation' do (inke liye research nahi hoti).\n"
+        'JSON: {"type": "health ya motivation", "topic": "...", '
+        '"claim": "health ho to popular daava, motivation ho to topic hi likho", '
+        '"pubmed_query": "health ho to English mein 3-5 keywords, warna khali string"}',
         temp=1.0)
 
 
-# ---------------- Step 2: research (PubMed, bilkul free) ----------------
+# ---------------- Step 2: research (sirf health topics ke liye, PubMed free) ----------------
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 
@@ -158,16 +165,32 @@ def research(claim, query):
     return info
 
 
-# ---------------- Step 3: 3 scripts ----------------
-def write_script(topic, info, angle):
+def motivation_info():
+    """Shayari/motivation ke liye koi research nahi, bas safe framing."""
+    return {
+        "evidence_level": "none",
+        "safe_to_publish": True,
+        "best_source": "",
+        "safe_framing": "Shayari/motivation hai. Koi medical ya health claim nahi karna.",
+    }
+
+
+# ---------------- Step 3: scripts ----------------
+def write_script(topic, info, angle, ctype):
     try:
+        if ctype == "health":
+            rules = ("NIYAM: 'ilaaj', 'theek ho jayega', 'saaf kar dega', 'guarantee' jaise daave "
+                     "bilkul nahi. Evidence ke hisaab se bolo: 'kuch studies', 'paramparik roop se "
+                     "maana jata hai', 'madad kar sakta hai'. Aakhri segment mein doctor se salah "
+                     "ka zikr karo. ")
+        else:
+            rules = ("NIYAM: koi health ya medical claim mat karo. Shayari ya motivation ki "
+                     "bhasha simple aur dil se ho. ")
         s = ask_json(
             f"Topic: {topic}\nAngle: {angle}\nEvidence: {json.dumps(info, ensure_ascii=False)}\n"
             f"Ek {SEGMENTS * 8} second ki Instagram Reel script likho.\n"
-            "NIYAM: 'ilaaj', 'theek ho jayega', 'saaf kar dega', 'guarantee' jaise daave bilkul nahi. "
-            "Evidence ke hisaab se bolo: 'kuch studies', 'paramparik roop se maana jata hai', "
-            "'madad kar sakta hai'. Aakhri segment mein doctor se salah ka zikr karo. Pehla "
-            "segment ek strong hook ho.\n"
+            + rules +
+            "Pehla segment ek strong hook ho.\n"
             f"- images: exactly {SEGMENTS + 1} scene prompts (English, character same rahe, "
             "har scene pichle se thoda aage badhe)\n"
             f"- segments: exactly {SEGMENTS}; har ek mein narration_hi (Devanagari Hindi, 18-22 "
@@ -194,7 +217,8 @@ def pick_best(scripts, info):
     } for i, s in enumerate(scripts)]
     res = ask_json(
         f"Evidence: {json.dumps(info, ensure_ascii=False)}\nScripts: {json.dumps(brief, ensure_ascii=False)}\n"
-        "Har script ko score do (1-10): hook (scroll rokne wala), accuracy (evidence se match). "
+        "Har script ko score do (1-10): hook (scroll rokne wala), accuracy (evidence se match; "
+        "agar evidence 'none' hai to shayari ki quality dekho). "
         "safe=false karo agar cure/ilaaj/guarantee ka daava hai, ya doctor se bachne ko kehta hai.\n"
         'JSON: {"scores":[{"i":0,"hook":0,"accuracy":0,"safe":true}]}')
     log("Judge:", res)
@@ -300,7 +324,7 @@ def text_image(text, size, fontsize=62):
     return np.array(img)
 
 
-def build_video(script, imgs, clips):
+def build_video(script, imgs, clips, footer):
     from moviepy.editor import (AudioFileClip, CompositeAudioClip, CompositeVideoClip,
                                 ImageClip, VideoFileClip, afx, concatenate_videoclips, vfx)
 
@@ -336,11 +360,10 @@ def build_video(script, imgs, clips):
                .set_duration(d).set_position(("center", 1250)))
         segs.append(CompositeVideoClip([v, sub], size=(W, H)).set_duration(d))
 
-    # end card: disclaimer
+    # end card
     end_d = 2.5
     end_base = fit(ImageClip(str(imgs[-1])).set_duration(end_d)).fx(vfx.colorx, 0.45)
-    end_txt = ImageClip(text_image("Ye sirf jankari ke liye hai. Bimari mein doctor se salah lein.",
-                                   (W - 120, 600), 56)).set_duration(end_d).set_position("center")
+    end_txt = ImageClip(text_image(footer, (W - 120, 600), 56)).set_duration(end_d).set_position("center")
     segs.append(CompositeVideoClip([end_base, end_txt], size=(W, H)).set_duration(end_d))
 
     final = concatenate_videoclips(segs)
@@ -393,17 +416,24 @@ def ig_publish(video_url, caption):
 def main():
     history = load_history()
     t = pick_topic(history)
-    topic, claim = t["topic"], t["claim"]
-    log("Topic:", topic, "| Claim:", claim)
+    topic = t["topic"]
+    ctype = "motivation" if t.get("type") == "motivation" else "health"
+    log("Topic:", topic, "| Type:", ctype)
 
-    info = research(claim, t.get("pubmed_query") or claim)
-    if not info or not info.get("safe_to_publish"):
-        log("SKIP: bharosemand source nahi mila ya claim safe nahi.")
-        history.append({"topic": topic, "status": "skipped"})
-        save_history(history)
-        return
+    if ctype == "health":
+        claim = t.get("claim") or topic
+        info = research(claim, t.get("pubmed_query") or claim)
+        if not info or not info.get("safe_to_publish"):
+            log("SKIP: bharosemand source nahi mila ya claim safe nahi.")
+            history.append({"topic": topic, "status": "skipped"})
+            save_history(history)
+            return
+        angles, footer = HEALTH_ANGLES, HEALTH_FOOTER
+    else:
+        info = motivation_info()
+        angles, footer = MOTIVATION_ANGLES, MOTIVATION_FOOTER
 
-    scripts = [s for s in (write_script(topic, info, a) for a in ANGLES) if s]
+    scripts = [s for s in (write_script(topic, info, a, ctype) for a in angles) if s]
     if not scripts:
         raise RuntimeError("Koi script nahi bani")
     best = pick_best(scripts, info)
@@ -427,10 +457,15 @@ def main():
                 log(f"Veo fail clip {i}, fallback zoom:", e)
         clips.append(None)
 
-    video = build_video(best, imgs, clips)
+    video = build_video(best, imgs, clips, footer)
     tags = " ".join(h if h.startswith("#") else f"#{h}" for h in best["hashtags"][:10])
-    caption = (f'{best["caption"]}\n\n⚠️ Ye sirf jankari ke liye hai. Bimari mein doctor se '
-               f'salah lein.\nSource: {info["best_source"]}\n\n{tags}')[:2200]
+    parts = [best["caption"]]
+    if ctype == "health":
+        parts.append(f"\n⚠️ {HEALTH_FOOTER}")
+        if info.get("best_source"):
+            parts.append(f"Source: {info['best_source']}")
+    parts.append(tags)
+    caption = "\n".join(parts)[:2200]
     log("Caption:\n", caption)
 
     if DRY_RUN:
