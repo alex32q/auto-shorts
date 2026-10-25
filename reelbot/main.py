@@ -1,17 +1,17 @@
 """
-Auto Instagram Reel bot
-Health topic -> PubMed research -> scripts -> best script -> images -> video -> Instagram
-Motivation/shayari topic -> seedha scripts -> best script -> images -> video -> Instagram
+Auto Instagram Reel bot: shayari reels (sad, love, romantic, judai, yaadein, motivation)
+Topic -> 3 scripts -> best script -> images -> voice + subtitles -> Instagram
 """
 import asyncio
 import io
 import json
 import os
 import pathlib
+import random
 import re
 import textwrap
 import time
-import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 import edge_tts
 import numpy as np
@@ -20,16 +20,13 @@ from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont
 
-# ---------------- Settings (env se badal sakte ho) ----------------
-TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-2.5-flash")
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-2.5-flash-image")
+# ---------------- Settings ----------------
+TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-3.5-flash-lite")
 VEO_MODEL = os.getenv("VEO_MODEL", "veo-3.1-fast-generate-preview")
-USE_VEO = os.getenv("USE_VEO", "0") == "1"      # 0 = free MoviePy motion (default), 1 = paid Veo
-IMAGE_BACKEND = os.getenv("IMAGE_BACKEND", "pollinations")  # pollinations = free, gemini = paid
-SEGMENTS = int(os.getenv("SEGMENTS", "3"))       # 3 segments = 4 photos = 3 Veo clips
+USE_VEO = os.getenv("USE_VEO", "0") == "1"     # 0 = free motion effects (default)
+SEGMENTS = int(os.getenv("SEGMENTS", "3"))      # 3 segments = 4 images
 VOICE = os.getenv("VOICE", "hi-IN-SwaraNeural")  # male: hi-IN-MadhurNeural
-DRY_RUN = os.getenv("DRY_RUN", "0") == "1"       # 1 = upload nahi, sirf video banao
-NICHE = os.getenv("NICHE", "ghar ke nuskhe, health myths, shayari aur motivation (Indian audience)")
+DRY_RUN = os.getenv("DRY_RUN", "0") == "1"      # 1 = upload nahi, sirf video banao
 GRAPH = "https://graph.facebook.com/v21.0"
 
 W, H = 1080, 1920
@@ -40,21 +37,29 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 STYLE = (
     "cute 2D cartoon illustration, soft warm colors, clean outlines, vertical 9:16, "
-    "main character: friendly Indian cartoon grandmother (dadi) with white hair bun, "
-    "round glasses, orange saree. No text or letters in the image"
+    "emotional mood, no text or letters in the image"
 )
-HEALTH_ANGLES = [
-    "Myth vs Fact (sach ya myth?)",
-    "Log ye galti karte hain",
-    "Dadi ka nuskha: kya science maanta hai?",
+
+SHAYARI_CATEGORIES = [
+    "Sad shayari (dard aur tanhai)",
+    "Love shayari (ishq aur pyaar)",
+    "Romantic shayari (nazdeeki aur chhoti chhoti baatein)",
+    "Judai shayari (breakup aur alag hona)",
+    "Intezaar shayari (kisi ka intezaar)",
+    "Yaadein shayari (purani yaadein)",
+    "Bewafai shayari (dhoka aur bharosa toot na)",
+    "Dosti shayari (purane dost)",
+    "Maa-papa shayari (ghar ki yaad)",
+    "Zindagi aur motivation shayari (himmat aur umeed)",
+    "Raat aur akelapan shayari (raat 2 baje ka mood)",
 ]
-MOTIVATION_ANGLES = [
-    "Sad shayari: dil ko chhu jane wali, akeli raat ka mood",
-    "Motivation: mushkil waqt mein himmat dene wali baat",
-    "Ek line jo sochne pe majboor kare",
+SHAYARI_ANGLES = [
+    "Ek sher jo seedha dil mein lage",
+    "Do line ka dard, phir ek umeed",
+    "Ek chhoti kahani jo shayari mein khatam ho",
+    "Wo baat jo kehni thi par keh nahi paye",
 ]
-HEALTH_FOOTER = "Ye sirf jankari ke liye hai. Bimari mein doctor se salah lein."
-MOTIVATION_FOOTER = "Roz ek shayari ke liye follow karo"
+FOOTER = "Aapka dil kya kehta hai? Comment karo"
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
@@ -64,7 +69,7 @@ def log(*a):
 
 
 # ---------------- Gemini helpers ----------------
-def ask_raw(prompt, as_json=False, temp=0.4):
+def ask_raw(prompt, as_json=False, temp=0.9):
     kwargs = {"temperature": temp}
     if as_json:
         kwargs["response_mime_type"] = "application/json"
@@ -79,7 +84,7 @@ def ask_raw(prompt, as_json=False, temp=0.4):
     raise RuntimeError("Gemini fail")
 
 
-def ask_json(prompt, temp=0.4):
+def ask_json(prompt, temp=0.9):
     text = ask_raw(prompt, as_json=True, temp=temp).text.strip()
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
     return json.loads(text)
@@ -97,107 +102,38 @@ def save_history(h):
 
 # ---------------- Step 1: topic ----------------
 def pick_topic(history):
-    past = [h["topic"] for h in history[-60:]]
+    past = [h["topic"] for h in history[-80:]]
+    cats = "; ".join(SHAYARI_CATEGORIES)
     return ask_json(
-        f"Niche: {NICHE}. Instagram Reel ke liye ek naya topic chuno. Ye topics repeat mat karo: {past}.\n"
-        "Agar topic health/nuskhe/khane-peene ka hai to type 'health' do. Agar shayari, sad mood, "
-        "motivation ya zindagi ki seekh ka hai to type 'motivation' do (inke liye research nahi hoti).\n"
-        'JSON: {"type": "health ya motivation", "topic": "...", '
-        '"claim": "health ho to popular daava, motivation ho to topic hi likho", '
-        '"pubmed_query": "health ho to English mein 3-5 keywords, warna khali string"}',
+        f"Instagram Reel ke liye ek naya shayari topic chuno. Category ho: {cats}. "
+        f"Ye topics repeat mat karo: {past}. Topic aisa ho jo log real life mein mehsoos karte "
+        "hain (jaise 'woh message jo seen hokar bhi reply nahi aaya', 'mummy ki yaad mein', "
+        "'raat ko purani chat dekhna').\n"
+        'JSON: {"topic": "..."}',
         temp=1.0)
 
 
-# ---------------- Step 2: research (sirf health topics ke liye, PubMed free) ----------------
-EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-
-
-def pubmed_search(query, n=6):
-    ids = requests.get(f"{EUTILS}/esearch.fcgi", params={
-        "db": "pubmed", "term": query, "retmax": n, "retmode": "json",
-        "sort": "relevance"}, timeout=40).json()["esearchresult"]["idlist"]
-    if not ids:
-        return []
-    raw = requests.get(f"{EUTILS}/efetch.fcgi", params={
-        "db": "pubmed", "id": ",".join(ids), "retmode": "xml"}, timeout=40).text
-    out = []
-    for art in ET.fromstring(raw).iter("PubmedArticle"):
-        t = art.find(".//ArticleTitle")
-        title = "".join(t.itertext()) if t is not None else ""
-        abstract = " ".join("".join(a.itertext()) for a in art.findall(".//AbstractText"))
-        if title and abstract:
-            out.append({
-                "title": title,
-                "journal": art.findtext(".//Journal/Title") or "",
-                "year": art.findtext(".//PubDate/Year") or "",
-                "types": [p.text for p in art.findall(".//PublicationType") if p.text],
-                "abstract": abstract[:700],
-            })
-    return out
-
-
-def research(claim, query):
+# ---------------- Step 2: scripts ----------------
+def write_script(topic, angle):
     try:
-        papers = pubmed_search(query)
-    except Exception as e:  # noqa
-        log("PubMed fail:", e)
-        return None
-    log("PubMed papers:", [p["title"] for p in papers])
-    if len(papers) < 2:
-        return None
-    info = ask_json(
-        f"Claim: {claim}\nResearch papers (PubMed): {json.dumps(papers, ensure_ascii=False)}\n"
-        "In papers se jaancho ki claim kitna saabit hai. Har paper ko quality score (1-10) do: "
-        "insaanon pe trial / meta-analysis / systematic review ko zyada, animal ya lab study ko kam. "
-        "Sabse relevant aur bharosemand paper chuno (best_idx). Agar papers claim ko saabit "
-        "nahi karte, to imandaari se wahi batao (claim myth bhi ho sakta hai). safe_to_publish "
-        "false karo agar papers claim se match nahi karte ya claim khatarnak hai "
-        "(jaise doctor ka ilaaj chhodna).\n"
-        'JSON: {"sources":[{"idx":0,"quality":0,"evidence_level":"human_trials|animal_or_lab|'
-        'traditional_only|unclear","summary":""}],"best_idx":0,"safe_to_publish":true,'
-        '"safe_framing":"claim ko imandaari se kaise bolna hai"}')
-    idx = info.get("best_idx", 0)
-    if not isinstance(idx, int) or idx >= len(papers):
-        idx = 0
-    p = papers[idx]
-    info["best_source"] = f'PubMed: {p["journal"]} {p["year"]}'.strip()
-    log("Research verdict:", json.dumps(info, ensure_ascii=False))
-    return info
-
-
-def motivation_info():
-    """Shayari/motivation ke liye koi research nahi, bas safe framing."""
-    return {
-        "evidence_level": "none",
-        "safe_to_publish": True,
-        "best_source": "",
-        "safe_framing": "Shayari/motivation hai. Koi medical ya health claim nahi karna.",
-    }
-
-
-# ---------------- Step 3: scripts ----------------
-def write_script(topic, info, angle, ctype):
-    try:
-        if ctype == "health":
-            rules = ("NIYAM: 'ilaaj', 'theek ho jayega', 'saaf kar dega', 'guarantee' jaise daave "
-                     "bilkul nahi. Evidence ke hisaab se bolo: 'kuch studies', 'paramparik roop se "
-                     "maana jata hai', 'madad kar sakta hai'. Aakhri segment mein doctor se salah "
-                     "ka zikr karo. ")
-        else:
-            rules = ("NIYAM: koi health ya medical claim mat karo. Shayari ya motivation ki "
-                     "bhasha simple aur dil se ho. ")
         s = ask_json(
-            f"Topic: {topic}\nAngle: {angle}\nEvidence: {json.dumps(info, ensure_ascii=False)}\n"
-            f"Ek {SEGMENTS * 8} second ki Instagram Reel script likho.\n"
-            + rules +
-            "Pehla segment ek strong hook ho.\n"
-            f"- images: exactly {SEGMENTS + 1} scene prompts (English, character same rahe, "
-            "har scene pichle se thoda aage badhe)\n"
-            f"- segments: exactly {SEGMENTS}; har ek mein narration_hi (Devanagari Hindi, 18-22 "
-            "shabd), caption_hinglish (Roman script, max 8 shabd, emoji nahi), motion_prompt "
-            "(English, photo i se photo i+1 tak kya movement ho)\n"
-            "- caption: Instagram caption Hinglish mein (hook + 2 line), hashtags: 8 hashtags\n"
-            'JSON: {"images":["..."],"segments":[{"narration_hi":"","caption_hinglish":"",'
+            f"Topic: {topic}\nAngle: {angle}\n"
+            f"Ek {SEGMENTS * 8} second ki Instagram Reel script likho jisme shayari ho.\n"
+            "NIYAM:\n"
+            "- Shayari bilkul original honi chahiye. Kisi famous shayar ya gaane ki line copy mat karo.\n"
+            "- Bhasha real life jaisi ho: Hindi/Hinglish, simple aur dil se.\n"
+            "- Pehla segment strong hook ho jo dil ko chhu jaye.\n"
+            "- Aakhri segment mein ek sawaal ya comment ka call-to-action ho.\n"
+            f"- character: ek short fixed description (jaise 'a young Indian woman in a yellow kurti, "
+            "long black hair'). Ye har image mein same rahega.\n"
+            f"- images: exactly {SEGMENTS + 1} scene prompts (English). Har prompt mein character "
+            "ka description repeat ho, aur mood topic ke hisaab se ho. Koi text na ho.\n"
+            f"- segments: exactly {SEGMENTS}; har ek mein narration_hi (Devanagari Hindi, 18-25 "
+            "shabd, shayari ke 1-2 sher), caption_hinglish (Roman script, max 8 shabd, emoji nahi), "
+            "motion_prompt (English, photo i se photo i+1 tak kya movement ho)\n"
+            "- caption: Instagram caption Hinglish mein (2 line), hashtags: 8 hashtags "
+            "(jaise #shayari #sadshayari #lovequotes #hindishayari)\n"
+            'JSON: {"character":"","images":["..."],"segments":[{"narration_hi":"","caption_hinglish":"",'
             '"motion_prompt":""}],"caption":"","hashtags":["#..."]}',
             temp=1.0)
         assert len(s["images"]) == SEGMENTS + 1 and len(s["segments"]) == SEGMENTS
@@ -207,8 +143,8 @@ def write_script(topic, info, angle, ctype):
         return None
 
 
-# ---------------- Step 4: judge ----------------
-def pick_best(scripts, info):
+# ---------------- Step 3: judge ----------------
+def pick_best(scripts):
     brief = [{
         "i": i,
         "hook": s["segments"][0]["caption_hinglish"],
@@ -216,23 +152,22 @@ def pick_best(scripts, info):
         "caption": s["caption"],
     } for i, s in enumerate(scripts)]
     res = ask_json(
-        f"Evidence: {json.dumps(info, ensure_ascii=False)}\nScripts: {json.dumps(brief, ensure_ascii=False)}\n"
-        "Har script ko score do (1-10): hook (scroll rokne wala), accuracy (evidence se match; "
-        "agar evidence 'none' hai to shayari ki quality dekho). "
-        "safe=false karo agar cure/ilaaj/guarantee ka daava hai, ya doctor se bachne ko kehta hai.\n"
-        'JSON: {"scores":[{"i":0,"hook":0,"accuracy":0,"safe":true}]}')
+        f"Shayari scripts: {json.dumps(brief, ensure_ascii=False)}\n"
+        "Har script ko score do (1-10): hook (scroll rokne wala), quality (shayari kitni dil se "
+        "nikli hui aur asli lagti hai, ghisi-pitti line nahi). safe=false karo agar script mein "
+        "gaali, nafrat, kisi asli insaan ka naam ya kisi ko nuksan pahunchane wali baat ho.\n"
+        'JSON: {"scores":[{"i":0,"hook":0,"quality":0,"safe":true}]}')
     log("Judge:", res)
-    ok = [x for x in res["scores"] if x["safe"] and x["accuracy"] >= 7]
+    ok = [x for x in res["scores"] if x["safe"] and x["quality"] >= 7]
     if not ok:
         return None
-    best = max(ok, key=lambda x: x["hook"] + x["accuracy"])
+    best = max(ok, key=lambda x: x["hook"] + x["quality"])
     return scripts[best["i"]]
 
 
-# ---------------- Step 5: images ----------------
+# ---------------- Step 4: images (free) ----------------
 def gen_image_free(prompt, seed, path):
-    """Pollinations.ai: free, bina key. Same seed = character thoda consistent."""
-    from urllib.parse import quote
+    """Pollinations.ai: free, bina key. Same seed se character thoda consistent rehta hai."""
     url = (f"https://image.pollinations.ai/prompt/{quote(prompt[:900])}"
            f"?width=720&height=1280&seed={seed}&model=flux&nologo=true")
     for attempt in range(4):
@@ -243,49 +178,22 @@ def gen_image_free(prompt, seed, path):
                 return
             raise RuntimeError(f"status {r.status_code}")
         except Exception as e:  # noqa
-            log("Free image retry:", e)
-            time.sleep(15 * (attempt + 1))
-    raise RuntimeError("Free image generation fail")
-
-
-def gen_image(prompt, ref, path):
-    parts = []
-    if ref:
-        parts.append(types.Part.from_bytes(data=pathlib.Path(ref).read_bytes(), mime_type="image/png"))
-        prompt = "Keep the exact same cartoon character and art style as the reference image. " + prompt
-    parts.append(prompt)
-    for attempt in range(3):
-        try:
-            r = client.models.generate_content(
-                model=IMAGE_MODEL, contents=parts,
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    image_config=types.ImageConfig(aspect_ratio="9:16")))
-            for p in r.candidates[0].content.parts:
-                if p.inline_data and p.inline_data.data:
-                    Image.open(io.BytesIO(p.inline_data.data)).convert("RGB").save(path)
-                    return
-            raise RuntimeError("image nahi mili")
-        except Exception as e:  # noqa
             log("Image retry:", e)
-            time.sleep(8 * (attempt + 1))
+            time.sleep(15 * (attempt + 1))
     raise RuntimeError("Image generation fail")
 
 
-def make_images(prompts):
+def make_images(script):
     paths, seed = [], int(time.time()) % 100000
-    for i, p in enumerate(prompts):
+    for i, p in enumerate(script["images"]):
         path = OUT / f"scene_{i}.png"
-        if IMAGE_BACKEND == "gemini":
-            gen_image(f"{STYLE}. Scene: {p}", paths[0] if paths else None, path)
-        else:
-            gen_image_free(f"{STYLE}. Scene: {p}", seed, path)
-            time.sleep(5)  # free server pe halka load
+        gen_image_free(f"{STYLE}. Character: {script['character']}. Scene: {p}", seed, path)
         paths.append(path)
+        time.sleep(5)
     return paths
 
 
-# ---------------- Step 6: Veo (photo i -> photo i+1) ----------------
+# ---------------- Step 5: Veo (optional, paid) ----------------
 def veo_clip(a, b, motion, out):
     def img(p):
         return types.Image(image_bytes=pathlib.Path(p).read_bytes(), mime_type="image/png")
@@ -305,7 +213,7 @@ def veo_clip(a, b, motion, out):
     v.video.save(str(out))
 
 
-# ---------------- Step 7: edit ----------------
+# ---------------- Step 6: edit ----------------
 def text_image(text, size, fontsize=62):
     try:
         font = ImageFont.truetype(FONT, fontsize)
@@ -324,7 +232,7 @@ def text_image(text, size, fontsize=62):
     return np.array(img)
 
 
-def build_video(script, imgs, clips, footer):
+def build_video(script, imgs, clips):
     from moviepy.editor import (AudioFileClip, CompositeAudioClip, CompositeVideoClip,
                                 ImageClip, VideoFileClip, afx, concatenate_videoclips, vfx)
 
@@ -343,16 +251,15 @@ def build_video(script, imgs, clips, footer):
         t += d
 
         if clips[i] and pathlib.Path(clips[i]).exists():
-            v = VideoFileClip(str(clips[i])).without_audio().fx(vfx.speedx, final_duration=d)
-            v = fit(v)
-        else:  # free motion: zoom-in / zoom-out / pan (har scene alag)
+            v = fit(VideoFileClip(str(clips[i])).without_audio().fx(vfx.speedx, final_duration=d))
+        else:  # free motion: zoom in / zoom out / pan (har scene alag)
             base = fit(ImageClip(str(imgs[i])).set_duration(d))
             mode = i % 3
-            if mode == 0:    # zoom in
+            if mode == 0:
                 moved = base.resize(lambda x, d=d: 1 + 0.10 * x / d).set_position("center")
-            elif mode == 1:  # zoom out
+            elif mode == 1:
                 moved = base.resize(lambda x, d=d: 1.10 - 0.10 * x / d).set_position("center")
-            else:            # pan left
+            else:
                 big = base.resize(1.12)
                 moved = big.set_position(lambda x, d=d: (-0.12 * W * x / d, -0.06 * H))
             v = CompositeVideoClip([moved], size=(W, H)).set_duration(d)
@@ -363,7 +270,7 @@ def build_video(script, imgs, clips, footer):
     # end card
     end_d = 2.5
     end_base = fit(ImageClip(str(imgs[-1])).set_duration(end_d)).fx(vfx.colorx, 0.45)
-    end_txt = ImageClip(text_image(footer, (W - 120, 600), 56)).set_duration(end_d).set_position("center")
+    end_txt = ImageClip(text_image(FOOTER, (W - 120, 600), 56)).set_duration(end_d).set_position("center")
     segs.append(CompositeVideoClip([end_base, end_txt], size=(W, H)).set_duration(end_d))
 
     final = concatenate_videoclips(segs)
@@ -379,7 +286,7 @@ def build_video(script, imgs, clips, footer):
     return out
 
 
-# ---------------- Step 8: upload ----------------
+# ---------------- Step 7: upload ----------------
 def upload_cloudinary(path):
     import cloudinary.uploader  # CLOUDINARY_URL env se config
     r = cloudinary.uploader.upload(str(path), resource_type="video")
@@ -415,35 +322,21 @@ def ig_publish(video_url, caption):
 # ---------------- Main ----------------
 def main():
     history = load_history()
-    t = pick_topic(history)
-    topic = t["topic"]
-    ctype = "motivation" if t.get("type") == "motivation" else "health"
-    log("Topic:", topic, "| Type:", ctype)
+    topic = pick_topic(history)["topic"]
+    log("Topic:", topic)
 
-    if ctype == "health":
-        claim = t.get("claim") or topic
-        info = research(claim, t.get("pubmed_query") or claim)
-        if not info or not info.get("safe_to_publish"):
-            log("SKIP: bharosemand source nahi mila ya claim safe nahi.")
-            history.append({"topic": topic, "status": "skipped"})
-            save_history(history)
-            return
-        angles, footer = HEALTH_ANGLES, HEALTH_FOOTER
-    else:
-        info = motivation_info()
-        angles, footer = MOTIVATION_ANGLES, MOTIVATION_FOOTER
-
-    scripts = [s for s in (write_script(topic, info, a, ctype) for a in angles) if s]
+    angles = random.sample(SHAYARI_ANGLES, 3)
+    scripts = [s for s in (write_script(topic, a) for a in angles) if s]
     if not scripts:
         raise RuntimeError("Koi script nahi bani")
-    best = pick_best(scripts, info)
+    best = pick_best(scripts)
     if not best:
-        log("SKIP: koi script safe/accurate nahi thi.")
+        log("SKIP: koi script quality ke saath safe nahi thi.")
         history.append({"topic": topic, "status": "skipped"})
         save_history(history)
         return
 
-    imgs = make_images(best["images"])
+    imgs = make_images(best)
 
     clips = []
     for i in range(SEGMENTS):
@@ -454,18 +347,12 @@ def main():
                 clips.append(out)
                 continue
             except Exception as e:  # noqa
-                log(f"Veo fail clip {i}, fallback zoom:", e)
+                log(f"Veo fail clip {i}, fallback:", e)
         clips.append(None)
 
-    video = build_video(best, imgs, clips, footer)
+    video = build_video(best, imgs, clips)
     tags = " ".join(h if h.startswith("#") else f"#{h}" for h in best["hashtags"][:10])
-    parts = [best["caption"]]
-    if ctype == "health":
-        parts.append(f"\n⚠️ {HEALTH_FOOTER}")
-        if info.get("best_source"):
-            parts.append(f"Source: {info['best_source']}")
-    parts.append(tags)
-    caption = "\n".join(parts)[:2200]
+    caption = "\n".join([best["caption"], tags])[:2200]
     log("Caption:\n", caption)
 
     if DRY_RUN:
